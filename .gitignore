@@ -1,0 +1,57 @@
+# IDE generated files
+.idea/
+*.iml
+
+# Python virtual environment
+env/
+
+# Cached files
+__pycache__/
+*.pyc
+*.pyo
+
+# Build artifacts
+build/
+dist/
+
+# Testing artifacts
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Linting artifacts
+.pylint.d
+
+# Code coverage artifacts
+coverage.xml
+.coverage
+
+# Typing artifacts
+.mypy_cache/
+
+# Dependency artifacts
+.venv/
+
+# Editor config files
+.editorconfig
+
+# Pylint config file
+.pylintrc
+
+# Pipfile.lock
+Pipfile.lock
+
+# Docs
+docs/build/
+
+# Travis config file
+.travis.yml
+
+# Pytest config file
+pytest.ini
+
+# Pytest cache
+.pytest_cache/
+
+# Pylint cache
+.pylint.d
