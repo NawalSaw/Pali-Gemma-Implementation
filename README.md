@@ -214,7 +214,7 @@ python src/inference.py --model_path <path> --image_path <path> --prompt "<promp
 The model architecture, weight loading, and inference pipeline are implemented and functional. There are no `__init__.py` files, so the package must be used from the repository root directory.
 
 ## References
-
+- [Umar's PaliGemma Implementation](https://github.com/hkproj/pytorch-paligemma)
 - [PaliGemma: A Versatile Vision-Language Model](https://arxiv.org/abs/2407.07726) — Google DeepMind
 - [SigLIP: Sigmoid Loss for Language Image Pre-Training](https://arxiv.org/abs/2303.15343)
 - [Gemma: Open Models Based on Gemini Research](https://ai.google.dev/gemma)

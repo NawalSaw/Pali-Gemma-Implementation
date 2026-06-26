@@ -92,8 +92,9 @@ def main(
     temperature: float = 1.0,
     top_p: float = 1.0,
     do_sample: bool = True,
+    only_cpu: bool = True,
 ):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cuda" if torch.cuda.is_available() and not only_cpu else "cpu"
     print(f"Using device: {device}")
 
     model, tokenizer = load_hf_model(model_path, device)

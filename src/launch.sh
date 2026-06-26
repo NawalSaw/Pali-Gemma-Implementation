@@ -1,8 +1,8 @@
 #!/bin/bash
 
-MODEL_PATH="$HOME/projects/paligemma-weights/paligemma-3b-pt-224"
-PROMPT="this building is "
-IMAGE_FILE_PATH="test_images/pic1.jpeg"
+MODEL_PATH="/path/to/your/model"
+PROMPT="Describe this image in detail."
+IMAGE_FILE_PATH="/path/to/your/image.jpg"
 MAX_TOKENS_TO_GENERATE=100
 TEMPERATURE=0.8
 TOP_P=0.9
@@ -11,9 +11,9 @@ ONLY_CPU="True"
 
 python inference.py \
     --model_path "$MODEL_PATH" \
+    --image_path "$IMAGE_FILE_PATH" \
     --prompt "$PROMPT" \
-    --image_file_path "$IMAGE_FILE_PATH" \
-    --max_tokens_to_generate $MAX_TOKENS_TO_GENERATE \
+    --max_tokens $MAX_TOKENS_TO_GENERATE \
     --temperature $TEMPERATURE \
     --top_p $TOP_P \
     --do_sample $DO_SAMPLE \
