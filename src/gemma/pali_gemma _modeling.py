@@ -10,52 +10,49 @@ from src.config.pali_gemma_config import PaliGemmaConfig
 
 class KVCache:
     def __init__(self):
-        self.key_cache = None
-        self.value_cache = None
+        self.key_cache = []
+        self.value_cache = []
 
     def update(
         self,
-        key_states: torch.Tensor,
-        value_states: torch.Tensor,
+        key_states,
+        value_states,
+        layer_idx
     ):
-        if self.key_cache is None:
-            self.key_cache = key_states
-            self.value_cache = value_states
+
+        if len(self.key_cache) <= layer_idx:
+            self.key_cache.append(key_states)
+            self.value_cache.append(value_states)
+
         else:
-            self.key_cache = torch.cat(
-                [self.key_cache, key_states],
+            self.key_cache[layer_idx] = torch.cat(
+                [self.key_cache[layer_idx], key_states],
                 dim=2
             )
 
-            self.value_cache = torch.cat(
-                [self.value_cache, value_states],
+            self.value_cache[layer_idx] = torch.cat(
+                [self.value_cache[layer_idx], value_states],
                 dim=2
             )
 
-        return self.key_cache, self.value_cache
+        return (
+            self.key_cache[layer_idx],
+            self.value_cache[layer_idx]
+        )
 
     def get_seq_length(self):
-        if self.key_cache is None:
+        if len(self.key_cache) == 0:
             return 0
-        return self.key_cache.shape[2]
+
+        return self.key_cache[0].shape[2]
 
     def num_items(self):
         return self.get_seq_length()
 
-    def get_batch_size(self):
-        if self.key_cache is None:
-            return 0
-        return self.key_cache.shape[0]
-
-    def get_key(self):
-        return self.key_cache
-
-    def get_value(self):
-        return self.value_cache
-
 class PaliGemmaMultiModalProjector(nn.Module):
     def __init__(self, config: PaliGemmaConfig):
         super().__init__()
+        self.config = config
         self.linear = nn.Linear(config.vision_config.hidden_size, config.vision_config.projection_dim)
 
     def forward(self, image_features: torch.Tensor) -> torch.Tensor:
@@ -78,7 +75,7 @@ class GemmaForCausalLM(nn.Module):
         )
 
     def get_input_embeddings(self):
-        return self.model.embed_tokens
+        return self.model.get_input_embeddings()
 
     def tie_weights(self):
         self.lm_head.weight = (
@@ -87,16 +84,16 @@ class GemmaForCausalLM(nn.Module):
 
     def forward(
         self,
-        inputs_embeds,
+        input_embeds,
         attention_mask,
         position_ids,
         kv_cache=None,
     ):
 
         hidden_states = self.model(
-            inputs_embeds=inputs_embeds,
-            attention_mask=attention_mask,
+            hidden_states=input_embeds,
             position_ids=position_ids,
+            attention_mask=attention_mask,
             kv_cache=kv_cache,
         )
 
@@ -112,13 +109,12 @@ class PaliGemmaModel(nn.Module):
 
         self.vision_model = SiglipVisionModel(config.vision_config) # Vision model processes images
         self.multi_model_projection = PaliGemmaMultiModalProjector(config) # Project image features to match language model dimensions
-        self.language_model = GemmaForCausalLM(config.language_config) # LM means language model
+        self.language_model = GemmaForCausalLM(config.text_config) # LM means language model
 
         self.pad_token_id = config.pad_token_id if config.pad_token_id is not None else -1
     
     def tie_weights(self):
         self.language_model.tie_weights()
-
 
     def _merge_input_ids_with_image_features(
         self,
@@ -166,14 +162,8 @@ class PaliGemmaModel(nn.Module):
             final_embeddings,
         )
 
-        expected_image_tokens = image_mask.sum().item()
-
-        assert expected_image_tokens == (
-            image_features.shape[0]
-            * image_features.shape[1]
-        ), (
-            f"Expected {expected_image_tokens} image tokens "
-            f"but got {image_features.shape[1]}"
+        assert image_mask.sum() == (
+            scaled_image_features.numel() // embed_dim
         )
 
         final_embeddings = final_embeddings.masked_scatter(
@@ -202,7 +192,9 @@ class PaliGemmaModel(nn.Module):
             )
 
             causal_mask = causal_mask.unsqueeze(0).unsqueeze(0)
-
+            padding_mask = (attention_mask[:, None, None, :] == 0)
+            causal_mask = causal_mask.masked_fill(padding_mask, float("-inf"))
+            
             position_ids = (
                 attention_mask.cumsum(-1) - 1
             )
@@ -211,6 +203,9 @@ class PaliGemmaModel(nn.Module):
                 attention_mask == 0,
                 0,
             )
+
+            # SHAPE OF CAUSAL MASK: (1, 1, seq_len, seq_len)
+            # SHAPE OF POSITION IDS: (batch_size, seq_len)
 
         else:
 
@@ -230,6 +225,9 @@ class PaliGemmaModel(nn.Module):
                 - 1
             ) 
 
+            # SHAPE OF CAUSAL MASK: (batch_size, 1, q_len, kv_len)
+            # SHAPE OF POSITION IDS: (batch_size, 1)
+
         return (
             final_embeddings,
             causal_mask,
@@ -243,8 +241,6 @@ class PaliGemmaModel(nn.Module):
         attention_mask: Optional[torch.Tensor] = None,
         kv_cache: Optional[KVCache] = None,
     ) -> Tuple:
-        assert torch.all(attention_mask == 1), "Attention mask should only contain 1s"
-
         # Get input embeddings
         # shape: (batch_size, seq_len, hidden_size)
         input_embeds = self.language_model.get_input_embeddings()(input_ids)

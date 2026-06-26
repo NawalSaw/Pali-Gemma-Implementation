@@ -1,6 +1,7 @@
-from turtle import position
 import torch
+import math
 import torch.nn as nn
+import torch.nn.functional as F
 
 class GemmaModel(nn.Module):
     def __init__(self, config):
@@ -10,10 +11,16 @@ class GemmaModel(nn.Module):
         self.layers = nn.ModuleList([GemmaLayer(config) for _ in range(config.num_hidden_layers)])
         self.norm = nn.RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
     
-    def forward(self, input_ids, position_ids, attention_mask=None, causal_mask=None):
-        hidden_states = self.embed_tokens(input_ids)
-        for layer in self.layers:
-            hidden_states = layer(hidden_states, position_ids=position_ids, attention_mask=attention_mask, causal_mask=causal_mask)
+    def get_input_embeddings(self):
+        return self.embed_tokens
+
+    def forward(self, hidden_states, position_ids, attention_mask=None, kv_cache=None):
+        hidden_states = (
+            hidden_states *
+            math.sqrt(self.config.hidden_size)
+        )
+        for i, layer in enumerate(self.layers):
+            hidden_states = layer(hidden_states, position_ids=position_ids, attention_mask=attention_mask, kv_cache=kv_cache, layer_idx=i)
         return self.norm(hidden_states)
 
 class GemmaMLP(nn.Module):
@@ -38,15 +45,26 @@ class RotaryEmbedding(nn.Module):
         self.dim = dim
         self.max_position_embeddings = max_position_embeddings
         self.base = base
-        self.inv_freq = 1.0 / (self.base ** (torch.arange(0, self.dim, 2).float() / self.dim))
-    
+        self.register_buffer(
+            "inv_freq",
+            1.0 / (
+                base **
+                (torch.arange(0, dim, 2).float() / dim)
+            ),
+            persistent=False
+        )
+
     def forward(self, q, k, position_ids):
-        seq_len=position_ids
-        t = torch.arange(seq_len, device=q.device).type_as(self.inv_freq)
-        freqs = torch.einsum("i,j->ij", t, self.inv_freq) # shape --> (seq_len, dim/2)
-        emb = torch.cat((freqs, freqs), dim=-1) # shape --> (seq_len, dim) what it does is duplicate the frequencies and concatenate them because we need to apply the same rotation to both query and key
-        cos = emb.cos()
-        sin = emb.sin()
+        freqs = torch.einsum("bt,d->btd", position_ids.float(), self.inv_freq.to(position_ids.device)) # shape --> (batch_size, seq_len, dim/2)
+        emb = torch.cat((freqs, freqs), dim=-1) # shape --> (batch_size, seq_len, dim) what it does is duplicate the frequencies and concatenate them because we need to apply the same rotation to both query and key
+        cos = emb.cos().unsqueeze(1)
+        sin = emb.sin().unsqueeze(1)
+
+        # SHAPE OF Q: (batch_size, num_heads, seq_len, head_dim)
+        # SHAPE OF K: (batch_size, num_heads, seq_len, head_dim)
+        # SHAPE OF COS: (batch_size, 1, seq_len, head_dim)
+        # SHAPE OF SIN: (batch_size, 1, seq_len, head_dim)
+
         q = q * cos + self._rotate_half(q) * sin
         k = k * cos + self._rotate_half(k) * sin
         return q, k
@@ -65,7 +83,8 @@ class GroupedMultiHeadAttention(nn.Module):
         self.num_key_value_heads = config.num_key_value_heads
         self.num_key_value_groups = config.num_key_value_groups
         self.max_position_embeddings = config.max_position_embeddings
-        
+        self.attention_dropout = config.attention_dropout
+    
         self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
         self.k_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
         self.v_proj = nn.Linear(self.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
@@ -80,7 +99,7 @@ class GroupedMultiHeadAttention(nn.Module):
         hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, seq_len, head_dim)
         return hidden_states.reshape(batch, num_key_value_heads * n_rep, seq_len, head_dim)
 
-    def forward(self, hidden_states, attention_mask=None, causal_mask=None, position_ids=None):
+    def forward(self, hidden_states, attention_mask=None, position_ids=None, kv_cache=None, layer_idx=None):
         q = self.q_proj(hidden_states)
         k = self.k_proj(hidden_states)
         v = self.v_proj(hidden_states)
@@ -91,6 +110,10 @@ class GroupedMultiHeadAttention(nn.Module):
 
         q, k = self.rotary_emb(q, k, position_ids)
 
+        # update
+        if kv_cache is not None:
+            k, v = kv_cache.update(k, v, layer_idx)
+
         k = self._repeat_kv(k, self.num_key_value_groups)
         v = self._repeat_kv(v, self.num_key_value_groups)
 
@@ -99,13 +122,10 @@ class GroupedMultiHeadAttention(nn.Module):
         attention = attention / math.sqrt(self.head_dim)
 
         if attention_mask is not None:
-            attention = attention.masked_fill(attention_mask == 0, float('-inf'))
+            attention = attention + attention_mask
 
-        if causal_mask is not None:
-            attention = attention.masked_fill(causal_mask == 0, float('-inf'))
-
-        attention = torch.softmax(attention, dim=-1)
-        attention = torch.dropout(attention, self.attention_dropout, train=self.training)
+        attention = torch.softmax(attention, dim=-1, dtype=torch.float32).to(q.dtype)
+        attention = F.dropout(attention, self.attention_dropout, training=self.training)
         output = torch.matmul(attention, v)
         output = output.transpose(1, 2).contiguous()
         output = output.reshape(output.size(0), output.size(1), self.hidden_size)
@@ -126,12 +146,12 @@ class GemmaLayer(nn.Module):
         self.pre_mlp_norm = nn.RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_mlp_norm = nn.RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
     
-    def forward(self, hidden_states, attention_mask=None, causal_mask=None, position_ids=None):
+    def forward(self, hidden_states, attention_mask=None, position_ids=None, kv_cache=None, layer_idx=None):
         
         residual = hidden_states
 
         hidden_states = self.pre_attn_norm(hidden_states)
-        hidden_states = self.self_attn(hidden_states, attention_mask=attention_mask, causal_mask=causal_mask, position_ids=position_ids)
+        hidden_states = self.self_attn(hidden_states, attention_mask=attention_mask, position_ids=position_ids, kv_cache=kv_cache, layer_idx=layer_idx)
         hidden_states = self.post_attn_norm(hidden_states)
         hidden_states = residual + hidden_states
 

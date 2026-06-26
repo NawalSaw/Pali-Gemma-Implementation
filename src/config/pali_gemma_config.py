@@ -1,4 +1,3 @@
-
 from src.config.gemma_config import GemmaConfig
 from src.config.vision_config import SignlipVisionConfig
 
@@ -14,6 +13,7 @@ class PaliGemmaConfig():
         projection_dim = 2048,
         hidden_size = 2048,
         pad_token_id = None,
+        training = True,
         **kwargs
     ):
         super().__init__()
