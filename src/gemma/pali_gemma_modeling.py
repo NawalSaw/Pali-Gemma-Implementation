@@ -98,8 +98,11 @@ class GemmaForCausalLM(nn.Module):
         )
 
         logits = self.lm_head(hidden_states)
-
-        return logits
+        result_data = {
+            "logits": logits,
+            "kv_cache": kv_cache
+        }
+        return result_data
 
 class PaliGemmaModel(nn.Module):
     def __init__(self, config: PaliGemmaConfig):
